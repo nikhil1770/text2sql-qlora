@@ -195,11 +195,15 @@ def run_readonly(db_path: str, sql: str) -> pd.DataFrame:
 
 def maybe_chart(df: pd.DataFrame):
     """Auto-chart when the shape suits it: one label column + one numeric
-    column, and few enough rows to read as a bar chart."""
+    column, and few enough rows to read as a bar chart. Column names are
+    sanitized first — Vega can't handle chars like ( ) [ ] . in field names
+    (e.g. SQL aggregates like sum(payment_value))."""
     if df.shape[1] == 2 and 1 < len(df) <= 25:
         label, value = df.columns[0], df.columns[1]
         if pd.api.types.is_numeric_dtype(df[value]):
-            st.bar_chart(df.set_index(label)[value])
+            safe = df.copy()
+            safe.columns = [re.sub(r"[^\w]", "_", str(c)) for c in safe.columns]
+            st.bar_chart(safe.set_index(safe.columns[0])[safe.columns[1]])
 
 
 # -------------------------------------------------------------------- UI ----
