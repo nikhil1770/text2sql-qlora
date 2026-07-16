@@ -131,6 +131,26 @@ def load_schema(db_path: str):
 
 # ----------------------------------------------------------- core actions ----
 
+def generate_sql(model, tokenizer, schema_string, question) -> str:
+    """Single generation attempt: question + schema -> SQL (greedy)."""
+    user_content = f"Database schema:\n{schema_string}\n\nQuestion: {question}"
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": user_content},
+    ]
+    enc = tokenizer.apply_chat_template(
+        messages, add_generation_prompt=True,
+        return_tensors="pt", return_dict=True,
+    ).to(model.device)
+    out = model.generate(
+        **enc, max_new_tokens=256, do_sample=False,
+        pad_token_id=tokenizer.eos_token_id,
+    )
+    gen_ids = out[0][enc["input_ids"].shape[-1]:]
+    text = tokenizer.decode(gen_ids, skip_special_tokens=True)
+    text = text.replace("```sql", "").replace("```", "").strip()
+    return text.split(";")[0].strip()
+
 def generate_sql_with_retry(model, tokenizer, schema_string, question,
                             db_path, max_retries=2):
     """Generate SQL; if it fails to execute, show the model the error and
