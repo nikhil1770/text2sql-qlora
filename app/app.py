@@ -131,25 +131,38 @@ def load_schema(db_path: str):
 
 # ----------------------------------------------------------- core actions ----
 
-def generate_sql(model, tokenizer, schema_string: str, question: str) -> str:
-    user_content = f"Database schema:\n{schema_string}\n\nQuestion: {question}"
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": user_content},
-    ]
-    enc = tokenizer.apply_chat_template(
-        messages, add_generation_prompt=True,
-        return_tensors="pt", return_dict=True,
-    ).to(model.device)
-    out = model.generate(
-        **enc, max_new_tokens=256, do_sample=False,
-        pad_token_id=tokenizer.eos_token_id,
-    )
-    gen_ids = out[0][enc["input_ids"].shape[-1]:]
-    text = tokenizer.decode(gen_ids, skip_special_tokens=True)
-    text = text.replace("```sql", "").replace("```", "").strip()
-    return text.split(";")[0].strip()                     # first statement only
-
+def generate_sql_with_retry(model, tokenizer, schema_string, question,
+                            db_path, max_retries=2):
+    """Generate SQL; if it fails to execute, show the model the error and
+    let it repair itself (same technique as evaluation.ipynb, +1.7 pts)."""
+    sql = generate_sql(model, tokenizer, schema_string, question)
+    for attempt in range(max_retries):
+        ok, _ = is_safe_sql(sql)
+        if not ok:
+            return sql, attempt            # let the UI show the block badge
+        try:
+            run_readonly(db_path, enforce_limit(sql))
+            return sql, attempt            # executes fine — done
+        except Exception as e:
+            msgs = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content":
+                    f"Database schema:\n{schema_string}\n\nQuestion: {question}"},
+                {"role": "assistant", "content": sql},
+                {"role": "user", "content":
+                    f"That query failed with this SQLite error:\n{e}\n\n"
+                    "Write a corrected SQL query. Output only the SQL, "
+                    "no explanation."},
+            ]
+            enc = tokenizer.apply_chat_template(
+                msgs, add_generation_prompt=True,
+                return_tensors="pt", return_dict=True).to(model.device)
+            out = model.generate(**enc, max_new_tokens=256, do_sample=False,
+                                 pad_token_id=tokenizer.eos_token_id)
+            text = tokenizer.decode(out[0][enc["input_ids"].shape[-1]:],
+                                    skip_special_tokens=True)
+            sql = text.replace("```sql", "").replace("```", "").strip().split(";")[0].strip()
+    return sql, max_retries
 
 def run_readonly(db_path: str, sql: str) -> pd.DataFrame:
     """Layer 2 guardrail: mode=ro means the engine itself refuses writes."""
@@ -262,10 +275,14 @@ if go and question:
 
     with st.spinner("Generating SQL …"):
         t0 = time.time()
-        sql = generate_sql(model, tokenizer, schema_string, question)
+        sql, n_retries = generate_sql_with_retry(
+            model, tokenizer, schema_string, question, db_path)
         gen_s = time.time() - t0
 
-    st.write("**Generated SQL** · " + f"{gen_s:.1f}s")
+    caption = f"**Generated SQL** · {gen_s:.1f}s"
+    if n_retries:
+        caption += f" · self-corrected ×{n_retries}"
+    st.write(caption)
     st.code(sql, language="sql")
 
     ok, reason = is_safe_sql(sql)
