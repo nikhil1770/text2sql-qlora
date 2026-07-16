@@ -14,6 +14,7 @@ Secrets / keys — NEVER hardcode a token in this file:
 """
 
 import os
+import re
 import sys
 import time
 import sqlite3
